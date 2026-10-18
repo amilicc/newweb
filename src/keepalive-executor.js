@@ -149,24 +149,54 @@ async function loginIfRequired(task, page) {
   if (submit) await submit.click({ timeout: 10000 });
   else await passwordField.press("Enter");
 
-  await page.waitForTimeout(2500);
-
-  if (task.success_selector) {
-    const success = await firstVisible(page, task.success_selector);
-    if (!success) {
-      return { success: false, attempted: true, message: "提交后未检测到登录成功标记；可能密码错误或需要额外验证" };
+  // 登录后各网站的跳转和前端状态更新速度不同。通用地轮询最多 30 秒，
+  // 不将任何特定网站的 URL 写死；优先采用用户配置的成功标记，否则观察登录表单是否消失。
+  const loginWaitStartedAt = Date.now();
+  const loginWaitTimeoutMs = 30000;
+  let successDetected = false;
+  while (Date.now() - loginWaitStartedAt < loginWaitTimeoutMs) {
+    if (task.success_selector) {
+      const success = await firstVisible(page, task.success_selector);
+      if (success) {
+        successDetected = true;
+        break;
+      }
+    } else {
+      const stillLoggedOut = task.logged_out_selector
+        ? await firstVisible(page, task.logged_out_selector)
+        : null;
+      const stillHasPassword = await firstVisible(page, task.password_selector || 'input[type="password"]');
+      if (!stillLoggedOut && !stillHasPassword) {
+        successDetected = true;
+        break;
+      }
     }
-  } else {
+    await page.waitForTimeout(1000);
+  }
+
+  if (!successDetected) {
+    let currentPath = "未知";
+    let pageTitle = "未知";
+    try { currentPath = new URL(page.url()).pathname || "/"; } catch {}
+    try { pageTitle = (await page.title()).slice(0, 100) || "空"; } catch {}
     const stillLoggedOut = task.logged_out_selector
       ? await firstVisible(page, task.logged_out_selector)
       : null;
     const stillHasPassword = await firstVisible(page, task.password_selector || 'input[type="password"]');
-    if (stillLoggedOut || stillHasPassword) {
-      return { success: false, attempted: true, message: "提交后登录表单或失效标记仍可见；请检查凭据、选择器或网站是否需要额外验证" };
-    }
+    const stillHasUsername = task.auth_mode === "username_password"
+      ? await firstVisible(page, task.username_selector || 'input[type="email"]')
+      : null;
+    const status = task.success_selector
+      ? "未检测到配置的登录成功标记"
+      : "登录表单或失效标记在等待结束时仍可见";
+    return {
+      success: false,
+      attempted: true,
+      message: `${status}；等待 30 秒后诊断：路径=${currentPath}，标题=${pageTitle}，用户名框可见=${!!stillHasUsername}，密码框可见=${!!stillHasPassword}，失效标记可见=${!!stillLoggedOut}。请检查凭据、选择器或网站登录流程`
+    };
   }
 
-  return { success: true, attempted: true, message: "登录成功" };
+  return { success: true, attempted: true, message: task.success_selector ? "检测到登录成功标记" : "等待后登录表单已消失，按登录成功处理" };
 }
 
 async function saveLoginState(record, force = false) {
