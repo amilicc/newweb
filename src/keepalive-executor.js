@@ -218,30 +218,38 @@ async function loginIfRequired(task, page) {
     await passwordField.press("Enter");
   }
 
-  // 登录后各网站的跳转和前端状态更新速度不同。通用地轮询最多 30 秒，
-  // 不将任何特定网站的 URL 写死；优先采用用户配置的成功标记，否则观察登录表单是否消失。
-  const loginWaitStartedAt = Date.now();
-  const loginWaitTimeoutMs = 30000;
+  // 登录后各网站的跳转和前端状态更新速度不同。
+  // 若用户配置了成功 URL 文本（例如 Tuta 的 /mail/），按要求在点击提交后完整等待 30 秒，
+  // 再检查最终 URL，避免因站点登录较慢而过早判定失败。其他配置继续使用原有轮询逻辑。
   let successDetected = false;
-  while (Date.now() - loginWaitStartedAt < loginWaitTimeoutMs) {
-    if (task.success_selector || task.success_url_contains) {
-      const success = (task.success_selector && await firstVisible(page, task.success_selector))
-        || matchesSuccessUrl(task, page);
-      if (success) {
-        successDetected = true;
-        break;
-      }
-    } else {
-      const stillLoggedOut = task.logged_out_selector
-        ? await firstVisible(page, task.logged_out_selector)
-        : null;
-      const stillHasPassword = await firstVisible(page, task.password_selector || 'input[type="password"]');
-      if (!stillLoggedOut && !stillHasPassword) {
-        successDetected = true;
-        break;
-      }
+  if (task.success_url_contains) {
+    await page.waitForTimeout(30000);
+    successDetected = matchesSuccessUrl(task, page);
+    if (!successDetected && task.success_selector) {
+      successDetected = Boolean(await firstVisible(page, task.success_selector));
     }
-    await page.waitForTimeout(1000);
+  } else {
+    const loginWaitStartedAt = Date.now();
+    const loginWaitTimeoutMs = 30000;
+    while (Date.now() - loginWaitStartedAt < loginWaitTimeoutMs) {
+      if (task.success_selector) {
+        const success = await firstVisible(page, task.success_selector);
+        if (success) {
+          successDetected = true;
+          break;
+        }
+      } else {
+        const stillLoggedOut = task.logged_out_selector
+          ? await firstVisible(page, task.logged_out_selector)
+          : null;
+        const stillHasPassword = await firstVisible(page, task.password_selector || 'input[type="password"]');
+        if (!stillLoggedOut && !stillHasPassword) {
+          successDetected = true;
+          break;
+        }
+      }
+      await page.waitForTimeout(1000);
+    }
   }
 
   if (!successDetected) {
@@ -300,6 +308,20 @@ async function refreshTask(id, record) {
   try {
     if (record.page.isClosed()) throw new Error("保活页面已关闭");
     await record.page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
+
+    // URL 成功条件优先：刷新后 SPA 可能仍在恢复会话，给它最多 10 秒完成
+    // 路由切换。期间一旦 URL 命中就不再提交凭据；未命中才进入登录表单判断。
+    if (record.task.success_url_contains && !matchesSuccessUrl(record.task, record.page)) {
+      const urlWaitStartedAt = Date.now();
+      while (Date.now() - urlWaitStartedAt < 10000) {
+        if (matchesSuccessUrl(record.task, record.page)) break;
+        await record.page.waitForTimeout(250);
+      }
+    }
+
+    let pathForLog = "未知";
+    try { pathForLog = new URL(record.page.url()).pathname || "/"; } catch {}
+    addLog(`[Keepalive] 任务 #${id} 刷新后路径=${pathForLog}，URL 成功条件命中=${matchesSuccessUrl(record.task, record.page)}`);
     const auth = await loginIfRequired(record.task, record.page);
     const now = new Date().toISOString();
 
@@ -319,9 +341,13 @@ async function refreshTask(id, record) {
         : auth.message;
       updateKeepaliveTaskStatus(id, "running", message, now);
       if (auth.attempted) {
-        addLog(`登录保活任务 #${id} 已执行登录提交并完成本轮检查`);
+        let finalPath = "未知";
+        try { finalPath = new URL(record.page.url()).pathname || "/"; } catch {}
+        addLog(`登录保活任务 #${id} 已执行登录提交并完成本轮检查；最终路径=${finalPath}；URL 成功条件命中=${matchesSuccessUrl(record.task, record.page)}`);
       } else if (record.task.auth_mode !== "none" && auth.success) {
-        addLog(`登录保活任务 #${id} 已检测到登录状态，跳过重复登录`);
+        let finalPath = "未知";
+        try { finalPath = new URL(record.page.url()).pathname || "/"; } catch {}
+        addLog(`登录保活任务 #${id} 已检测到登录状态，跳过重复登录；最终路径=${finalPath}；URL 成功条件命中=${matchesSuccessUrl(record.task, record.page)}`);
       }
     }
   } catch (error) {
