@@ -8,6 +8,24 @@ const { addLog } = require("./logger");
 const activeTasks = new Map();
 const startingTasks = new Map();
 
+function getFinalPath(page) {
+  try { return new URL(page.url()).pathname || "/"; } catch { return "未知"; }
+}
+
+function getIntervalLabel(task) {
+  const seconds = Math.max(1, Number(task.refresh_interval_seconds) || 60);
+  if (seconds % 86400 === 0) return `${seconds / 86400} 天`;
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${seconds} 秒`;
+}
+
+function getNextRunLabel(task, from = Date.now()) {
+  const seconds = Math.max(1, Number(task.refresh_interval_seconds) || 60);
+  const next = new Date(from + seconds * 1000);
+  return `${next.toISOString()}（约 ${getIntervalLabel(task)} 后）`;
+}
+
 function safeMessage(value) {
   return String(value || "未知错误")
     .replace(/https?:\/\/[^\s"'<>]+/gi, "[目标地址]")
@@ -332,7 +350,7 @@ async function runScheduledLogin(id, record) {
       ? `${auth.message}；云端登录态备份失败，请检查 rclone 配置`
       : `${auth.message}；本轮已完成，等待下次定时登录`;
     updateKeepaliveTaskStatus(id, "running", message, now);
-    addLog(`定时登录任务 #${id} 本轮完成；最终路径=${(() => { try { return new URL(page.url()).pathname || "/"; } catch { return "未知"; } })()}`);
+    addLog(`定时登录任务 #${id} ${auth.attempted ? "登录成功" : "登录状态有效"}；${auth.message}；最终路径=${getFinalPath(page)}；本轮完成，下次计划执行时间(UTC)=${getNextRunLabel(record.task)}`);
     // 定时登录模式不常驻刷新页面：保存状态后关闭当前上下文，等待下一周期再打开。
     await closeKeepaliveContext(id, record.task.auth_mode !== "none");
     record.page = null;
@@ -460,7 +478,12 @@ async function startKeepaliveTask(id) {
           ? `${auth.message}；云端登录态备份失败，请检查 rclone 配置`
           : auth.message;
         updateKeepaliveTaskStatus(taskId, "running", task.task_mode === "login" ? `${message}；本轮完成，等待下次定时登录` : message, now);
-        addLog(`${task.task_mode === "login" ? "定时登录任务" : "定时刷新任务"} #${taskId} 已启动`);
+        if (task.task_mode === "login") {
+          addLog(`定时登录任务 #${taskId} ${auth.attempted ? "登录成功" : "登录状态有效"}；${auth.message}；最终路径=${getFinalPath(page)}；本轮完成，下次计划执行时间(UTC)=${getNextRunLabel(task)}`);
+          addLog(`定时登录任务 #${taskId} 已启动，等待下次计划执行`);
+        } else {
+          addLog(`定时刷新任务 #${taskId} 已启动`);
+        }
         if (task.task_mode === "login") {
           await closeKeepaliveContext(taskId, task.auth_mode !== "none");
           record.page = null;
