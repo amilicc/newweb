@@ -233,6 +233,7 @@ function initializeDatabase() {
       name TEXT NOT NULL,
       url TEXT NOT NULL,
       refresh_interval_seconds INTEGER NOT NULL DEFAULT 60,
+      task_mode TEXT NOT NULL DEFAULT 'refresh',
       auth_mode TEXT NOT NULL DEFAULT 'none',
       username_enc TEXT,
       password_enc TEXT,
@@ -270,6 +271,9 @@ function initializeDatabase() {
   }
   if (!keepaliveColumns.includes("success_url_contains")) {
     db.exec("ALTER TABLE keepalive_tasks ADD COLUMN success_url_contains TEXT");
+  }
+  if (!keepaliveColumns.includes("task_mode")) {
+    db.exec("ALTER TABLE keepalive_tasks ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'refresh'");
   }
 
   if (!columns.includes("stay_seconds")) {
@@ -744,21 +748,27 @@ function recordVisit(id, status = "success") {
 
 function getKeepaliveTasks() {
   return db.prepare(`
-    SELECT id, name, url, refresh_interval_seconds, auth_mode,
-           username_selector, password_selector, submit_selector, success_selector, success_url_contains, logged_out_selector,
+    SELECT id, name, url, refresh_interval_seconds, task_mode, auth_mode,
+           username_enc, username_selector, password_selector, submit_selector, success_selector, success_url_contains, logged_out_selector,
            enabled, status, last_refresh, last_status, created_at
     FROM keepalive_tasks
     ORDER BY id ASC
-  `).all();
+  `).all().map(task => {
+    const { username_enc, ...publicTask } = task;
+    return { ...publicTask, username: decryptText(username_enc) };
+  });
 }
 
 function getKeepaliveTask(id) {
-  return db.prepare(`
-    SELECT id, name, url, refresh_interval_seconds, auth_mode,
-           username_selector, password_selector, submit_selector, success_selector, success_url_contains, logged_out_selector,
+  const task = db.prepare(`
+    SELECT id, name, url, refresh_interval_seconds, task_mode, auth_mode,
+           username_enc, username_selector, password_selector, submit_selector, success_selector, success_url_contains, logged_out_selector,
            enabled, status, last_refresh, last_status, created_at
     FROM keepalive_tasks WHERE id = ?
   `).get(id);
+  if (!task) return null;
+  const { username_enc, ...publicTask } = task;
+  return { ...publicTask, username: decryptText(username_enc) };
 }
 
 function getKeepaliveTaskForExecution(id) {
@@ -774,18 +784,18 @@ function getKeepaliveTaskForExecution(id) {
 }
 
 function createKeepaliveTask({
-  name, url, refresh_interval_seconds = 60, auth_mode = "none",
+  name, url, refresh_interval_seconds = 60, task_mode = "refresh", auth_mode = "none",
   username = "", password = "", username_selector = "",
   password_selector = "", submit_selector = "", success_selector = "",
   logged_out_selector = "", success_url_contains = "", enabled = 0
 }) {
   const result = db.prepare(`
     INSERT INTO keepalive_tasks (
-      name, url, refresh_interval_seconds, auth_mode, username_enc, password_enc,
+      name, url, refresh_interval_seconds, task_mode, auth_mode, username_enc, password_enc,
       username_selector, password_selector, submit_selector, success_selector, success_url_contains, logged_out_selector, enabled, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    name, url, Number(refresh_interval_seconds), auth_mode,
+    name, url, Number(refresh_interval_seconds), task_mode, auth_mode,
     encryptText(username), encryptText(password),
     username_selector || null, password_selector || null, submit_selector || null,
     success_selector || null, success_url_contains || null, logged_out_selector || null, enabled ? 1 : 0, enabled ? "starting" : "stopped"
@@ -800,6 +810,7 @@ function updateKeepaliveTask(id, values = {}) {
   const url = values.url !== undefined ? values.url : old.url;
   const interval = values.refresh_interval_seconds !== undefined
     ? Number(values.refresh_interval_seconds) : old.refresh_interval_seconds;
+  const taskMode = values.task_mode !== undefined ? values.task_mode : (old.task_mode || "refresh");
   const authMode = values.auth_mode !== undefined ? values.auth_mode : old.auth_mode;
   const username = values.username !== undefined && String(values.username).trim() !== "" ? values.username : old.username;
   const password = values.password !== undefined && values.password !== "" ? values.password : old.password;
@@ -811,11 +822,11 @@ function updateKeepaliveTask(id, values = {}) {
   const loggedOutSelector = values.logged_out_selector !== undefined ? values.logged_out_selector : old.logged_out_selector;
 
   db.prepare(`
-    UPDATE keepalive_tasks SET name = ?, url = ?, refresh_interval_seconds = ?, auth_mode = ?,
+    UPDATE keepalive_tasks SET name = ?, url = ?, refresh_interval_seconds = ?, task_mode = ?, auth_mode = ?,
       username_enc = ?, password_enc = ?, username_selector = ?, password_selector = ?,
       submit_selector = ?, success_selector = ?, success_url_contains = ?, logged_out_selector = ? WHERE id = ?
   `).run(
-    name, url, interval, authMode, encryptText(username), encryptText(password),
+    name, url, interval, taskMode, authMode, encryptText(username), encryptText(password),
     usernameSelector || null, passwordSelector || null, submitSelector || null,
     successSelector || null, successUrlContains || null, loggedOutSelector || null, id
   );

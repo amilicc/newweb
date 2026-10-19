@@ -285,14 +285,21 @@
       <section class="panel">
         <div class="panel-header">
           <div>
-            <h2>登录保活</h2>
-            <p>独立持有浏览器页面，支持自定义秒数刷新；不改变普通任务执行逻辑</p>
+            <h2>定时刷新 / 定时登录</h2>
+            <p>独立于最前面的定时访问 URL；每个账号独立运行，可选择持续刷新或按周期登录一次</p>
           </div>
           <button id="refresh-keepalive-button" type="button" class="secondary-button">刷新</button>
         </div>
 
         <form id="keepalive-form" class="keepalive-form" novalidate>
           <div class="form-grid">
+            <div class="form-group">
+              <label for="keepalive-task-mode">任务类型</label>
+              <select id="keepalive-task-mode">
+                <option value="refresh">定时刷新</option>
+                <option value="login">定时登录</option>
+              </select>
+            </div>
             <div class="form-group">
               <label for="keepalive-name">任务名称</label>
               <input id="keepalive-name" type="text" placeholder="例如：网站登录保活" required>
@@ -301,9 +308,19 @@
               <label for="keepalive-url">目标网址</label>
               <input id="keepalive-url" type="url" placeholder="https://example.com" required>
             </div>
-            <div class="form-group">
-              <label for="keepalive-interval">刷新间隔（秒）</label>
-              <input id="keepalive-interval" type="number" min="10" max="86400" step="1" value="60" required>
+            <div class="form-group" id="keepalive-interval-group">
+              <label for="keepalive-interval" id="keepalive-interval-label">刷新间隔</label>
+              <div class="inline-form-controls">
+                <input id="keepalive-interval" type="number" min="10" max="86400" step="1" value="60" required>
+                <select id="keepalive-interval-unit" aria-label="时间单位">
+                  <option value="seconds">秒</option>
+                  <option value="minutes">分钟</option>
+                  <option value="hours">小时</option>
+                  <option value="days">天</option>
+                  <option value="months">月（按 30 天计算）</option>
+                </select>
+              </div>
+              <p id="keepalive-interval-hint" class="field-hint">定时刷新最小间隔为 10 秒，最大 24 小时。</p>
             </div>
             <div class="form-group">
               <label for="keepalive-auth-mode">登录方式</label>
@@ -361,8 +378,17 @@
           <div id="keepalive-form-message" class="form-message"></div>
         </form>
 
-        <div id="keepalive-tasks-container" class="tasks-container">
-          <div class="empty-state">暂无登录保活任务</div>
+        <div class="keepalive-task-section">
+          <h3>定时刷新</h3>
+          <div id="keepalive-refresh-tasks-container" class="tasks-container">
+            <div class="empty-state">暂无定时刷新任务</div>
+          </div>
+        </div>
+        <div class="keepalive-task-section">
+          <h3>定时登录</h3>
+          <div id="keepalive-login-tasks-container" class="tasks-container">
+            <div class="empty-state">暂无定时登录任务</div>
+          </div>
         </div>
       </section>
 

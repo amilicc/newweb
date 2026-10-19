@@ -1160,6 +1160,7 @@ app.post("/api/keepalive-tasks", async (req, res) => {
     const name = String(req.body?.name || "").trim();
     const url = String(req.body?.url || "").trim();
     const refreshInterval = Number(req.body?.refresh_interval_seconds);
+    const taskMode = String(req.body?.task_mode || "refresh");
     const authMode = String(req.body?.auth_mode || "none");
     const username = String(req.body?.username || "");
     const password = String(req.body?.password || "");
@@ -1170,8 +1171,10 @@ app.post("/api/keepalive-tasks", async (req, res) => {
     if (!(["http:", "https:"].includes(parsedUrl.protocol))) {
       return res.status(400).json({ error: "网址必须使用 HTTP 或 HTTPS" });
     }
-    if (!Number.isInteger(refreshInterval) || refreshInterval < 10 || refreshInterval > 86400) {
-      return res.status(400).json({ error: "刷新间隔必须为 10–86400 秒" });
+    if (!["refresh", "login"].includes(taskMode)) return res.status(400).json({ error: "任务模式无效" });
+    const maxInterval = taskMode === "refresh" ? 86400 : 365 * 24 * 60 * 60;
+    if (!Number.isInteger(refreshInterval) || refreshInterval < (taskMode === "refresh" ? 10 : 1) || refreshInterval > maxInterval) {
+      return res.status(400).json({ error: taskMode === "refresh" ? "刷新间隔必须为 10 秒至 24 小时" : "定时登录间隔必须为 1 秒至 365 天" });
     }
     if (!["none", "username_password", "password_only"].includes(authMode)) {
       return res.status(400).json({ error: "登录方式无效" });
@@ -1195,7 +1198,7 @@ app.post("/api/keepalive-tasks", async (req, res) => {
     selectors.success_url_contains = successUrlContains;
 
     const task = createKeepaliveTask({
-      name, url, refresh_interval_seconds: refreshInterval, auth_mode: authMode,
+      name, url, refresh_interval_seconds: refreshInterval, task_mode: taskMode, auth_mode: authMode,
       username, password, ...selectors, enabled: 0
     });
     addLog(`创建登录保活任务 #${task.id}`);
@@ -1214,7 +1217,7 @@ app.put("/api/keepalive-tasks/:id", async (req, res) => {
     if (!oldTask) return res.status(404).json({ error: "登录保活任务不存在" });
 
     const values = {};
-    for (const field of ["name", "url", "refresh_interval_seconds", "auth_mode", "username", "password", "username_selector", "password_selector", "submit_selector", "success_selector", "success_url_contains", "logged_out_selector"]) {
+    for (const field of ["name", "url", "refresh_interval_seconds", "task_mode", "auth_mode", "username", "password", "username_selector", "password_selector", "submit_selector", "success_selector", "success_url_contains", "logged_out_selector"]) {
       if (req.body?.[field] !== undefined) values[field] = req.body[field];
     }
     if (values.name !== undefined) {
@@ -1227,10 +1230,15 @@ app.put("/api/keepalive-tasks/:id", async (req, res) => {
       try { parsed = new URL(values.url); } catch { return res.status(400).json({ error: "请输入有效的网址" }); }
       if (!["http:", "https:"].includes(parsed.protocol)) return res.status(400).json({ error: "网址必须使用 HTTP 或 HTTPS" });
     }
+    if (values.task_mode !== undefined && !["refresh", "login"].includes(values.task_mode)) {
+      return res.status(400).json({ error: "任务模式无效" });
+    }
     if (values.refresh_interval_seconds !== undefined) {
       values.refresh_interval_seconds = Number(values.refresh_interval_seconds);
-      if (!Number.isInteger(values.refresh_interval_seconds) || values.refresh_interval_seconds < 10 || values.refresh_interval_seconds > 86400) {
-        return res.status(400).json({ error: "刷新间隔必须为 10–86400 秒" });
+      const effectiveMode = values.task_mode || oldTask.task_mode || "refresh";
+      const maxInterval = effectiveMode === "refresh" ? 86400 : 365 * 24 * 60 * 60;
+      if (!Number.isInteger(values.refresh_interval_seconds) || values.refresh_interval_seconds < (effectiveMode === "refresh" ? 10 : 1) || values.refresh_interval_seconds > maxInterval) {
+        return res.status(400).json({ error: effectiveMode === "refresh" ? "刷新间隔必须为 10 秒至 24 小时" : "定时登录间隔必须为 1 秒至 365 天" });
       }
     }
     if (values.auth_mode !== undefined && !["none", "username_password", "password_only"].includes(values.auth_mode)) {

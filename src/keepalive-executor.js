@@ -288,18 +288,67 @@ async function saveLoginState(record, force = false) {
 }
 
 function scheduleRefresh(id, record) {
-  if (record.stopRequested || record.needsAttention || activeTasks.get(id) !== record) return;
+  if (record.stopRequested || (record.needsAttention && record.task.task_mode !== "login") || activeTasks.get(id) !== record) return;
   record.timer = setTimeout(() => {
-    refreshTask(id, record).catch(error => {
+    const work = record.task.task_mode === "login"
+      ? runScheduledLogin(id, record)
+      : refreshTask(id, record);
+    work.catch(error => {
       if (!record.stopRequested) {
         const reason = safeMessage(error.message);
-        updateKeepaliveTaskStatus(id, "error", `刷新失败：${reason}`, new Date().toISOString());
-        addLog(`登录保活任务 #${id} 刷新失败：${reason}`, "error");
+        updateKeepaliveTaskStatus(id, "error", `执行失败：${reason}`, new Date().toISOString());
+        addLog(`登录保活任务 #${id} 执行失败：${reason}`, "error");
       }
       scheduleRefresh(id, record);
     });
-  }, Math.max(10, Number(record.task.refresh_interval_seconds) || 60) * 1000);
+  }, Math.max(1, Number(record.task.refresh_interval_seconds) || 60) * 1000);
   if (record.timer && typeof record.timer.unref === "function") record.timer.unref();
+}
+
+async function runScheduledLogin(id, record) {
+  if (record.stopRequested || activeTasks.get(id) !== record || record.refreshing) return;
+  record.refreshing = true;
+  let page = null;
+  try {
+    page = await createKeepalivePage(id);
+    record.page = page;
+    await page.goto(record.task.url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    if (record.stopRequested || activeTasks.get(id) !== record) return;
+
+    const auth = await loginIfRequired(record.task, page);
+    const now = new Date().toISOString();
+    if (!auth.success) {
+      record.needsAttention = true;
+      updateKeepaliveTaskStatus(id, "needs_attention", auth.message, now);
+      addLog(`定时登录任务 #${id} 本轮未成功：${auth.message}`, "error");
+      await closeKeepaliveContext(id, false);
+      record.page = null;
+      return;
+    }
+
+    record.needsAttention = false;
+    const backedUp = await saveLoginState(record, auth.attempted);
+    const message = record.task.auth_mode !== "none" && !backedUp
+      ? `${auth.message}；云端登录态备份失败，请检查 rclone 配置`
+      : `${auth.message}；本轮已完成，等待下次定时登录`;
+    updateKeepaliveTaskStatus(id, "running", message, now);
+    addLog(`定时登录任务 #${id} 本轮完成；最终路径=${(() => { try { return new URL(page.url()).pathname || "/"; } catch { return "未知"; } })()}`);
+    // 定时登录模式不常驻刷新页面：保存状态后关闭当前上下文，等待下一周期再打开。
+    await closeKeepaliveContext(id, record.task.auth_mode !== "none");
+    record.page = null;
+  } catch (error) {
+    if (!record.stopRequested) {
+      const reason = safeMessage(error.message);
+      record.needsAttention = true;
+      updateKeepaliveTaskStatus(id, "error", `定时登录失败：${reason}`, new Date().toISOString());
+      addLog(`定时登录任务 #${id} 执行失败：${reason}`, "error");
+    }
+    try { await closeKeepaliveContext(id, false); } catch {}
+    record.page = null;
+  } finally {
+    record.refreshing = false;
+    scheduleRefresh(id, record);
+  }
 }
 
 async function refreshTask(id, record) {
@@ -401,13 +450,21 @@ async function startKeepaliveTask(id) {
         record.needsAttention = true;
         updateKeepaliveTaskStatus(taskId, "needs_attention", auth.message, now);
         addLog(`登录保活任务 #${taskId} 需要处理：${auth.message}`, "error");
+        if (task.task_mode === "login") {
+          await closeKeepaliveContext(taskId, false);
+          record.page = null;
+        }
       } else {
         const backedUp = await saveLoginState(record, auth.attempted);
         const message = task.auth_mode !== "none" && !backedUp
           ? `${auth.message}；云端登录态备份失败，请检查 rclone 配置`
           : auth.message;
-        updateKeepaliveTaskStatus(taskId, "running", message, now);
-        addLog(`登录保活任务 #${taskId} 已启动`);
+        updateKeepaliveTaskStatus(taskId, "running", task.task_mode === "login" ? `${message}；本轮完成，等待下次定时登录` : message, now);
+        addLog(`${task.task_mode === "login" ? "定时登录任务" : "定时刷新任务"} #${taskId} 已启动`);
+        if (task.task_mode === "login") {
+          await closeKeepaliveContext(taskId, task.auth_mode !== "none");
+          record.page = null;
+        }
       }
 
       scheduleRefresh(taskId, record);
@@ -456,8 +513,8 @@ async function stopKeepaliveTask(id) {
   record.stopRequested = true;
   if (record.timer) clearTimeout(record.timer);
   activeTasks.delete(taskId);
-  try { await closeKeepaliveContext(taskId, record.task.auth_mode !== "none" && !record.needsAttention); } catch {}
-  try { if (!record.page.isClosed()) await record.page.close(); } catch {}
+  try { await closeKeepaliveContext(taskId, record.task.auth_mode !== "none" && !record.needsAttention && record.task.task_mode !== "login"); } catch {}
+  try { if (record.page && !record.page.isClosed()) await record.page.close(); } catch {}
   updateKeepaliveTaskStatus(taskId, "stopped", "已停止");
   addLog(`登录保活任务 #${taskId} 已停止`);
   return true;

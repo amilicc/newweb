@@ -123,6 +123,10 @@ const keepaliveForm = document.getElementById("keepalive-form");
 const keepaliveName = document.getElementById("keepalive-name");
 const keepaliveUrl = document.getElementById("keepalive-url");
 const keepaliveInterval = document.getElementById("keepalive-interval");
+const keepaliveTaskMode = document.getElementById("keepalive-task-mode");
+const keepaliveIntervalUnit = document.getElementById("keepalive-interval-unit");
+const keepaliveIntervalLabel = document.getElementById("keepalive-interval-label");
+const keepaliveIntervalHint = document.getElementById("keepalive-interval-hint");
 const keepaliveAuthMode = document.getElementById("keepalive-auth-mode");
 const keepaliveUsername = document.getElementById("keepalive-username");
 const keepalivePassword = document.getElementById("keepalive-password");
@@ -135,7 +139,8 @@ const keepaliveSuccessSelector = document.getElementById("keepalive-success-sele
 const keepaliveSuccessUrlContains = document.getElementById("keepalive-success-url-contains");
 const keepaliveLoggedOutSelector = document.getElementById("keepalive-logged-out-selector");
 const keepaliveFormMessage = document.getElementById("keepalive-form-message");
-const keepaliveTasksContainer = document.getElementById("keepalive-tasks-container");
+const keepaliveRefreshTasksContainer = document.getElementById("keepalive-refresh-tasks-container");
+const keepaliveLoginTasksContainer = document.getElementById("keepalive-login-tasks-container");
 const refreshKeepaliveButton = document.getElementById("refresh-keepalive-button");
 const keepaliveCancelEditButton = document.getElementById("keepalive-cancel-edit");
 let editingKeepaliveId = null;
@@ -2916,15 +2921,52 @@ function updateKeepaliveAuthFields() {
   keepalivePasswordGroup.classList.toggle("hidden", mode === "none");
 }
 
+function updateKeepaliveIntervalConstraints() {
+  const loginMode = keepaliveTaskMode.value === "login";
+  const unit = keepaliveIntervalUnit.value;
+  const factor = { seconds: 1, minutes: 60, hours: 3600, days: 86400, months: 2592000 }[unit] || 1;
+  keepaliveInterval.min = loginMode ? "1" : String(Math.max(1, Math.ceil(10 / factor)));
+  keepaliveInterval.max = String(Math.floor((loginMode ? 31536000 : 86400) / factor));
+  if (loginMode) {
+    keepaliveIntervalLabel.textContent = "登录周期";
+    keepaliveIntervalHint.textContent = "登录成功后结束本轮执行，到期后再运行；1 个月按 30 天计算，最长 12 个月。";
+  } else {
+    keepaliveIntervalLabel.textContent = "刷新间隔";
+    keepaliveIntervalHint.textContent = "定时刷新最小间隔为 10 秒，最大 24 小时。";
+  }
+}
+
+function updateKeepaliveTaskModeFields() {
+  const loginMode = keepaliveTaskMode.value === "login";
+  if (!loginMode && keepaliveIntervalUnit.value !== "seconds") {
+    const factor = { seconds: 1, minutes: 60, hours: 3600, days: 86400, months: 2592000 }[keepaliveIntervalUnit.value] || 1;
+    keepaliveInterval.value = String(Math.round(Number(keepaliveInterval.value || 1) * factor));
+    keepaliveIntervalUnit.value = "seconds";
+  }
+  keepaliveIntervalUnit.style.display = loginMode ? "" : "none";
+  updateKeepaliveIntervalConstraints();
+  keepaliveForm.querySelector('button[type="submit"]').textContent = editingKeepaliveId ? "保存修改" : (loginMode ? "创建定时登录任务" : "创建定时刷新任务");
+  if (loginMode) {
+    keepaliveUsername.placeholder = "定时登录账号用户名";
+    keepalivePassword.placeholder = "网站登录密码（加密保存）";
+  } else {
+    keepaliveUsername.placeholder = "目标网站用户名";
+    keepalivePassword.placeholder = "仅保存在 Remain 数据库加密字段中";
+  }
+}
+
 function resetKeepaliveForm() {
   editingKeepaliveId = null;
   keepaliveForm.reset();
   keepaliveInterval.value = "60";
+  keepaliveTaskMode.value = "refresh";
+  keepaliveIntervalUnit.value = "seconds";
   keepaliveAuthMode.value = "none";
   keepaliveUsername.placeholder = "目标网站用户名";
   keepalivePassword.placeholder = "仅保存在 Remain 数据库加密字段中";
-  keepaliveForm.querySelector('button[type="submit"]').textContent = "创建保活任务";
+  keepaliveForm.querySelector('button[type="submit"]').textContent = "创建任务";
   keepaliveCancelEditButton.classList.add("hidden");
+  updateKeepaliveTaskModeFields();
   keepaliveFormMessage.textContent = "";
   keepaliveFormMessage.classList.remove("form-error-text");
   updateKeepaliveAuthFields();
@@ -2941,46 +2983,60 @@ function keepaliveStatusLabel(task) {
   return labels[task.status] || task.status || "未知";
 }
 
-function renderKeepaliveTasks(tasks) {
-  if (!Array.isArray(tasks) || tasks.length === 0) {
-    keepaliveTasksContainer.innerHTML = '<div class="empty-state">暂无登录保活任务</div>';
-    return;
+function formatKeepaliveInterval(seconds, taskMode) {
+  const value = Math.max(1, Number(seconds) || 60);
+  const units = [
+    [2592000, "月"], [86400, "天"], [3600, "小时"], [60, "分钟"], [1, "秒"]
+  ];
+  for (const [unitSeconds, label] of units) {
+    if (value >= unitSeconds && value % unitSeconds === 0) return `${value / unitSeconds} ${label}`;
   }
+  return `${value} 秒`;
+}
 
-  keepaliveTasksContainer.innerHTML = tasks.map(task => {
-    const running = Number(task.enabled) === 1;
-    const statusClass = task.status === "running" ? "status-on" : "status-off";
-    const statusText = keepaliveStatusLabel(task);
-    const authLabels = {
-      none: "无需登录",
-      username_password: "用户名 + 密码",
-      password_only: "仅密码"
-    };
-    return `
-      <article class="task-card keepalive-card" data-keepalive-id="${Number(task.id)}">
-        <div class="task-card-header">
-          <div class="task-title-area">
-            <span class="task-id">#${Number(task.id)}</span>
-            <strong class="task-name">${escapeHtml(task.name)}</strong>
-            <span class="${statusClass}">${escapeHtml(statusText)}</span>
+function renderKeepaliveTasks(tasks) {
+  const refreshTasks = (Array.isArray(tasks) ? tasks : []).filter(task => (task.task_mode || "refresh") === "refresh");
+  const loginTasks = (Array.isArray(tasks) ? tasks : []).filter(task => task.task_mode === "login");
+  const renderList = (items, emptyText) => {
+    if (!items.length) return `<div class="empty-state">${emptyText}</div>`;
+    return items.map(task => {
+      const running = Number(task.enabled) === 1;
+      const statusClass = task.status === "running" ? "status-on" : "status-off";
+      const statusText = keepaliveStatusLabel(task);
+      const authLabels = { none: "无需登录", username_password: "用户名 + 密码", password_only: "仅密码" };
+      const modeLabel = task.task_mode === "login" ? "定时登录" : "定时刷新";
+      const intervalLabel = formatKeepaliveInterval(task.refresh_interval_seconds, task.task_mode);
+      const usernameLabel = task.username ? escapeHtml(task.username) : (task.auth_mode === "none" ? "未配置" : "未设置用户名");
+      return `
+        <article class="task-card keepalive-card" data-keepalive-id="${Number(task.id)}">
+          <div class="task-card-header">
+            <div class="task-title-area">
+              <span class="task-id">#${Number(task.id)}</span>
+              <strong class="task-name">${escapeHtml(task.name)}</strong>
+              <span class="${statusClass}">${escapeHtml(statusText)}</span>
+            </div>
+            <div class="keepalive-card-actions">
+              <button type="button" class="secondary-button" data-keepalive-action="edit" data-id="${Number(task.id)}">编辑</button>
+              ${running
+                ? `<button type="button" class="secondary-button" data-keepalive-action="stop" data-id="${Number(task.id)}">停止</button>`
+                : `<button type="button" class="primary-button" data-keepalive-action="start" data-id="${Number(task.id)}">启动</button>`}
+              <button type="button" class="danger-button" data-keepalive-action="delete" data-id="${Number(task.id)}">删除</button>
+            </div>
           </div>
-          <div class="keepalive-card-actions">
-            <button type="button" class="secondary-button" data-keepalive-action="edit" data-id="${Number(task.id)}">编辑</button>
-            ${running
-              ? `<button type="button" class="secondary-button" data-keepalive-action="stop" data-id="${Number(task.id)}">停止</button>`
-              : `<button type="button" class="primary-button" data-keepalive-action="start" data-id="${Number(task.id)}">启动</button>`}
-            <button type="button" class="danger-button" data-keepalive-action="delete" data-id="${Number(task.id)}">删除</button>
+          <div class="task-url"><span class="task-label">目标网址</span><span class="task-url-value">${escapeHtml(task.url)}</span></div>
+          <div class="keepalive-meta">
+            <span>模式：${modeLabel}</span>
+            <span>${task.task_mode === "login" ? "登录周期" : "刷新间隔"}：${escapeHtml(intervalLabel)}</span>
+            <span>用户名：${usernameLabel}</span>
+            <span>登录方式：${escapeHtml(authLabels[task.auth_mode] || task.auth_mode)}</span>
+            <span>最近执行：${escapeHtml(formatTime(task.last_refresh))}</span>
           </div>
-        </div>
-        <div class="task-url"><span class="task-label">目标网址</span><span class="task-url-value">${escapeHtml(task.url)}</span></div>
-        <div class="keepalive-meta">
-          <span>刷新间隔：${Number(task.refresh_interval_seconds)} 秒</span>
-          <span>登录方式：${escapeHtml(authLabels[task.auth_mode] || task.auth_mode)}</span>
-          <span>最近刷新：${escapeHtml(formatTime(task.last_refresh))}</span>
-        </div>
-        ${task.last_status ? `<p class="keepalive-last-status">${escapeHtml(task.last_status)}</p>` : ""}
-      </article>`;
-  }).join("");
+          ${task.last_status ? `<p class="keepalive-last-status">${escapeHtml(task.last_status)}</p>` : ""}
+        </article>`;
+    }).join("");
+  };
+  keepaliveRefreshTasksContainer.innerHTML = renderList(refreshTasks, "暂无定时刷新任务");
+  keepaliveLoginTasksContainer.innerHTML = renderList(loginTasks, "暂无定时登录任务");
 }
 
 async function loadKeepaliveTasks() {
@@ -3000,6 +3056,8 @@ async function loadKeepaliveTasks() {
 }
 
 keepaliveAuthMode.addEventListener("change", updateKeepaliveAuthFields);
+keepaliveTaskMode.addEventListener("change", updateKeepaliveTaskModeFields);
+keepaliveIntervalUnit.addEventListener("change", updateKeepaliveIntervalConstraints);
 keepaliveCancelEditButton.addEventListener("click", resetKeepaliveForm);
 refreshKeepaliveButton.addEventListener("click", loadKeepaliveTasks);
 
@@ -3012,7 +3070,8 @@ keepaliveForm.addEventListener("submit", async event => {
   const payload = {
     name: keepaliveName.value.trim(),
     url: keepaliveUrl.value.trim(),
-    refresh_interval_seconds: Number(keepaliveInterval.value),
+    refresh_interval_seconds: Math.round(Number(keepaliveInterval.value) * ({ seconds: 1, minutes: 60, hours: 3600, days: 86400, months: 2592000 }[keepaliveIntervalUnit.value] || 1)),
+    task_mode: keepaliveTaskMode.value,
     auth_mode: mode,
     username: keepaliveUsername.value,
     password: keepalivePassword.value,
@@ -3029,8 +3088,9 @@ keepaliveForm.addEventListener("submit", async event => {
     keepaliveFormMessage.classList.add("form-error-text");
     return;
   }
-  if (!Number.isInteger(payload.refresh_interval_seconds) || payload.refresh_interval_seconds < 10 || payload.refresh_interval_seconds > 86400) {
-    keepaliveFormMessage.textContent = "刷新间隔需为 10–86400 秒的整数。";
+  const minInterval = payload.task_mode === "refresh" ? 10 : 1;
+  if (!Number.isInteger(Number(keepaliveInterval.value)) || Number(keepaliveInterval.value) < 1 || !Number.isSafeInteger(payload.refresh_interval_seconds) || payload.refresh_interval_seconds < minInterval || payload.refresh_interval_seconds > (payload.task_mode === "refresh" ? 86400 : 31536000)) {
+    keepaliveFormMessage.textContent = payload.task_mode === "refresh" ? "定时刷新间隔需为 10 秒至 24 小时。" : "定时登录间隔需为 1 秒至 12 个月（按每月 30 天计算）。";
     keepaliveFormMessage.classList.add("form-error-text");
     return;
   }
@@ -3054,7 +3114,7 @@ keepaliveForm.addEventListener("submit", async event => {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || (isEditing ? "更新保活任务失败" : "创建保活任务失败"));
-    const successMessage = isEditing ? "保活任务已更新。" : "保活任务已创建。";
+    const successMessage = isEditing ? "任务已更新。" : "任务已创建。";
     resetKeepaliveForm();
     keepaliveFormMessage.textContent = successMessage;
     keepaliveFormMessage.classList.remove("form-error-text");
@@ -3065,7 +3125,7 @@ keepaliveForm.addEventListener("submit", async event => {
   }
 });
 
-keepaliveTasksContainer.addEventListener("click", async event => {
+async function handleKeepaliveTaskAction(event) {
   const button = event.target.closest("button[data-keepalive-action]");
   if (!button) return;
   const id = Number(button.dataset.id);
@@ -3081,7 +3141,14 @@ keepaliveTasksContainer.addEventListener("click", async event => {
       editingKeepaliveId = id;
       keepaliveName.value = task.name || "";
       keepaliveUrl.value = task.url || "";
-      keepaliveInterval.value = String(task.refresh_interval_seconds || 60);
+      keepaliveTaskMode.value = task.task_mode || "refresh";
+      const storedSeconds = Number(task.refresh_interval_seconds || 60);
+      const intervalOptions = [{ unit: "months", seconds: 2592000 }, { unit: "days", seconds: 86400 }, { unit: "hours", seconds: 3600 }, { unit: "minutes", seconds: 60 }, { unit: "seconds", seconds: 1 }];
+      const displayUnit = task.task_mode === "login"
+        ? (intervalOptions.find(item => storedSeconds >= item.seconds && storedSeconds % item.seconds === 0) || intervalOptions[intervalOptions.length - 1])
+        : intervalOptions[intervalOptions.length - 1];
+      keepaliveIntervalUnit.value = displayUnit.unit;
+      keepaliveInterval.value = String(storedSeconds / displayUnit.seconds);
       keepaliveAuthMode.value = task.auth_mode || "none";
       keepaliveUsername.value = "";
       keepalivePassword.value = "";
@@ -3094,6 +3161,7 @@ keepaliveTasksContainer.addEventListener("click", async event => {
       keepaliveSuccessUrlContains.value = task.success_url_contains || "";
       keepaliveLoggedOutSelector.value = task.logged_out_selector || "";
       keepaliveForm.querySelector('button[type="submit"]').textContent = "保存修改";
+      updateKeepaliveTaskModeFields();
       keepaliveCancelEditButton.classList.remove("hidden");
       keepaliveFormMessage.textContent = "编辑时密码可以留空，表示保留原密码。";
       keepaliveFormMessage.classList.remove("form-error-text");
@@ -3116,9 +3184,13 @@ keepaliveTasksContainer.addEventListener("click", async event => {
   } finally {
     button.disabled = false;
   }
-});
+}
+
+keepaliveRefreshTasksContainer.addEventListener("click", handleKeepaliveTaskAction);
+keepaliveLoginTasksContainer.addEventListener("click", handleKeepaliveTaskAction);
 
 updateKeepaliveAuthFields();
+updateKeepaliveTaskModeFields();
 
 /*
  * ============================
