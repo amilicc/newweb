@@ -132,6 +132,7 @@ const keepaliveUsernameSelector = document.getElementById("keepalive-username-se
 const keepalivePasswordSelector = document.getElementById("keepalive-password-selector");
 const keepaliveSubmitSelector = document.getElementById("keepalive-submit-selector");
 const keepaliveSuccessSelector = document.getElementById("keepalive-success-selector");
+const keepaliveSuccessUrlContains = document.getElementById("keepalive-success-url-contains");
 const keepaliveLoggedOutSelector = document.getElementById("keepalive-logged-out-selector");
 const keepaliveFormMessage = document.getElementById("keepalive-form-message");
 const keepaliveTasksContainer = document.getElementById("keepalive-tasks-container");
@@ -3019,6 +3020,7 @@ keepaliveForm.addEventListener("submit", async event => {
     password_selector: keepalivePasswordSelector.value.trim(),
     submit_selector: keepaliveSubmitSelector.value.trim(),
     success_selector: keepaliveSuccessSelector.value.trim(),
+    success_url_contains: keepaliveSuccessUrlContains.value.trim(),
     logged_out_selector: keepaliveLoggedOutSelector.value.trim()
   };
 
@@ -3089,6 +3091,7 @@ keepaliveTasksContainer.addEventListener("click", async event => {
       keepalivePasswordSelector.value = task.password_selector || "";
       keepaliveSubmitSelector.value = task.submit_selector || "";
       keepaliveSuccessSelector.value = task.success_selector || "";
+      keepaliveSuccessUrlContains.value = task.success_url_contains || "";
       keepaliveLoggedOutSelector.value = task.logged_out_selector || "";
       keepaliveForm.querySelector('button[type="submit"]').textContent = "保存修改";
       keepaliveCancelEditButton.classList.remove("hidden");

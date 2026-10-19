@@ -80,14 +80,18 @@ async function visibleLoginErrorText(page) {
 // the login form is visible in the initial HTML while JavaScript is still validating the
 // existing session. If both markers are configured, give the success marker priority for
 // a short grace period before accepting the logged-out marker as final.
+function matchesSuccessUrl(task, page) {
+  const expected = String(task.success_url_contains || "");
+  return Boolean(expected && String(page.url() || "").includes(expected));
+}
+
 async function waitForConfiguredAuthMarker(task, page, timeoutMs = 10000) {
-  if (!task.success_selector && !task.logged_out_selector) return;
+  if (!task.success_selector && !task.success_url_contains && !task.logged_out_selector) return;
   const startedAt = Date.now();
-  const graceMs = task.success_selector && task.logged_out_selector ? 5000 : 0;
+  const graceMs = (task.success_selector || task.success_url_contains) && task.logged_out_selector ? 5000 : 0;
   while (Date.now() - startedAt < timeoutMs) {
-    const successMarker = task.success_selector
-      ? await firstVisible(page, task.success_selector)
-      : null;
+    const successMarker = (task.success_selector && await firstVisible(page, task.success_selector))
+      || matchesSuccessUrl(task, page);
     if (successMarker) return;
 
     const elapsed = Date.now() - startedAt;
@@ -113,9 +117,8 @@ async function loginIfRequired(task, page) {
   const loggedOutMarker = task.logged_out_selector
     ? await firstVisible(page, task.logged_out_selector)
     : null;
-  const successMarker = task.success_selector
-    ? await firstVisible(page, task.success_selector)
-    : null;
+  const successMarker = (task.success_selector && await firstVisible(page, task.success_selector))
+    || matchesSuccessUrl(task, page);
 
   // A visible success marker is the strongest positive signal. It wins over a stale
   // login-page marker that may remain visible briefly during client-side page switching.
@@ -125,7 +128,7 @@ async function loginIfRequired(task, page) {
 
   // 当同时配置了登录成功和登录失效标记时，必须命中其中一个才能决定下一步。
   // 如果两个标记都没有出现，即使页面上存在密码框，也不能据此认定已掉线并重复提交凭据。
-  if (task.success_selector && task.logged_out_selector && !successMarker && !loggedOutMarker) {
+  if ((task.success_selector || task.success_url_contains) && task.logged_out_selector && !successMarker && !loggedOutMarker) {
     return {
       success: false,
       attempted: false,
@@ -142,8 +145,8 @@ async function loginIfRequired(task, page) {
 
   // 配置成功标记但未命中时，若也没有明确的登录表单/失效标记，不盲目提交密码。
   if (!loggedOutMarker && !passwordField) {
-    if (task.success_selector) {
-      return { success: false, attempted: false, message: "未检测到登录成功标记或登录表单，登录状态不明确；请检查成功/失效选择器" };
+    if (task.success_selector || task.success_url_contains) {
+      return { success: false, attempted: false, message: "未检测到登录成功标记或登录表单，登录状态不明确；请检查成功标记/URL 文本/失效选择器" };
     }
     let currentTitle = "";
     try { currentTitle = await page.title(); } catch {}
@@ -221,8 +224,9 @@ async function loginIfRequired(task, page) {
   const loginWaitTimeoutMs = 30000;
   let successDetected = false;
   while (Date.now() - loginWaitStartedAt < loginWaitTimeoutMs) {
-    if (task.success_selector) {
-      const success = await firstVisible(page, task.success_selector);
+    if (task.success_selector || task.success_url_contains) {
+      const success = (task.success_selector && await firstVisible(page, task.success_selector))
+        || matchesSuccessUrl(task, page);
       if (success) {
         successDetected = true;
         break;
@@ -252,8 +256,8 @@ async function loginIfRequired(task, page) {
     const stillHasUsername = task.auth_mode === "username_password"
       ? await firstVisible(page, task.username_selector || 'input[type="email"]')
       : null;
-    const status = task.success_selector
-      ? "未检测到配置的登录成功标记"
+    const status = (task.success_selector || task.success_url_contains)
+      ? "未检测到配置的登录成功标记或 URL 文本"
       : "登录表单或失效标记在等待结束时仍可见";
     const errorText = await visibleLoginErrorText(page);
     return {
@@ -263,7 +267,7 @@ async function loginIfRequired(task, page) {
     };
   }
 
-  return { success: true, attempted: true, message: task.success_selector ? "检测到登录成功标记" : "等待后登录表单已消失，按登录成功处理" };
+  return { success: true, attempted: true, message: (task.success_selector || task.success_url_contains) ? (matchesSuccessUrl(task, page) ? "检测到登录成功 URL 文本" : "检测到登录成功标记") : "等待后登录表单已消失，按登录成功处理" };
 }
 
 async function saveLoginState(record, force = false) {

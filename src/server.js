@@ -1190,6 +1190,9 @@ app.post("/api/keepalive-tasks", async (req, res) => {
       if (value.length > 250) return res.status(400).json({ error: "选择器长度不能超过 250 个字符" });
       selectors[field] = value;
     }
+    const successUrlContains = String(req.body?.success_url_contains || "").trim();
+    if (successUrlContains.length > 250) return res.status(400).json({ error: "登录成功 URL 文本不能超过 250 个字符" });
+    selectors.success_url_contains = successUrlContains;
 
     const task = createKeepaliveTask({
       name, url, refresh_interval_seconds: refreshInterval, auth_mode: authMode,
@@ -1211,7 +1214,7 @@ app.put("/api/keepalive-tasks/:id", async (req, res) => {
     if (!oldTask) return res.status(404).json({ error: "登录保活任务不存在" });
 
     const values = {};
-    for (const field of ["name", "url", "refresh_interval_seconds", "auth_mode", "username", "password", "username_selector", "password_selector", "submit_selector", "success_selector", "logged_out_selector"]) {
+    for (const field of ["name", "url", "refresh_interval_seconds", "auth_mode", "username", "password", "username_selector", "password_selector", "submit_selector", "success_selector", "success_url_contains", "logged_out_selector"]) {
       if (req.body?.[field] !== undefined) values[field] = req.body[field];
     }
     if (values.name !== undefined) {
@@ -1235,11 +1238,15 @@ app.put("/api/keepalive-tasks/:id", async (req, res) => {
     }
     if (values.password !== undefined) values.password = String(values.password);
     if (values.username !== undefined) values.username = String(values.username);
-    for (const field of ["username_selector", "password_selector", "submit_selector", "success_selector", "logged_out_selector"]) {
+    for (const field of ["username_selector", "password_selector", "submit_selector", "success_selector", "success_url_contains", "logged_out_selector"]) {
       if (values[field] !== undefined) {
         values[field] = String(values[field] || "").trim();
         if (values[field].length > 250) return res.status(400).json({ error: "选择器长度不能超过 250 个字符" });
       }
+    }
+    if (values.success_url_contains !== undefined) {
+      values.success_url_contains = String(values.success_url_contains || "").trim();
+      if (values.success_url_contains.length > 250) return res.status(400).json({ error: "登录成功 URL 文本不能超过 250 个字符" });
     }
     const currentCredentials = getKeepaliveTaskForExecution(id);
     const nextAuthMode = values.auth_mode !== undefined ? values.auth_mode : oldTask.auth_mode;

@@ -325,7 +325,7 @@
 
           <details class="keepalive-advanced">
             <summary>高级选项（可选：登录状态检测与表单选择器）</summary>
-            <p>默认自动识别常见登录表单。为了避免每次刷新重复登录，可填写登录成功标记或登录失效标记；成功标记在已登录页面出现，失效标记在登录过期时出现。选择器使用 CSS 语法。</p>
+            <p>默认自动识别常见登录表单。为了避免每次刷新重复登录，可配置登录成功判断（页面元素或 URL 文本），也可填写登录失效标记。成功条件应只在已登录页面成立。</p>
             <div class="form-grid">
               <div class="form-group">
                 <label for="keepalive-username-selector">用户名输入框选择器</label>
@@ -340,8 +340,12 @@
                 <input id="keepalive-submit-selector" type="text" placeholder='例如：button[type="submit"]'>
               </div>
               <div class="form-group">
-                <label for="keepalive-success-selector">登录成功标记选择器</label>
+                <label for="keepalive-success-selector">登录成功标记选择器（CSS，可选）</label>
                 <input id="keepalive-success-selector" type="text" placeholder="例如：.account-avatar；已登录时出现">
+              </div>
+              <div class="form-group">
+                <label for="keepalive-success-url-contains">登录成功 URL 包含文本（可选）</label>
+                <input id="keepalive-success-url-contains" type="text" placeholder="例如：/mail/；登录后地址中出现">
               </div>
               <div class="form-group">
                 <label for="keepalive-logged-out-selector">登录失效标记选择器</label>
