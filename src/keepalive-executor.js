@@ -34,6 +34,48 @@ async function findVisible(page, customSelector, defaults) {
   return null;
 }
 
+// SPA 登录页可能在 domcontentloaded 之后才渲染表单。先给页面一个短暂稳定窗口，
+// 避免因密码框暂时不存在而把尚未登录的页面误判为已有登录态。
+async function waitForPasswordField(page, selector, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const field = await firstVisible(page, selector || 'input[type="password"]');
+    if (field) return field;
+    await page.waitForTimeout(250);
+  }
+  return firstVisible(page, selector || 'input[type="password"]');
+}
+
+function looksLikeLoginLocation(url, title) {
+  let path = "";
+  try { path = new URL(url).pathname; } catch {}
+  return /(?:^|\/)(?:login|log-in|signin|sign-in|auth|authenticate|session)(?:\/|$)/i.test(path)
+    || /\b(login|sign[ -]?in|log[ -]?in|authentication)\b/i.test(String(title || ""));
+}
+
+async function visibleLoginErrorText(page) {
+  const selectors = [
+    '[role="alert"]',
+    '[aria-live="assertive"]',
+    '[aria-live="polite"]',
+    '[class*="error" i]',
+    '[class*="invalid" i]'
+  ];
+  for (const selector of selectors) {
+    try {
+      const nodes = page.locator(selector);
+      const count = Math.min(await nodes.count(), 5);
+      for (let i = 0; i < count; i++) {
+        const node = nodes.nth(i);
+        if (!(await node.isVisible().catch(() => false))) continue;
+        const value = (await node.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+        if (value) return value.slice(0, 180);
+      }
+    } catch {}
+  }
+  return "未发现常见错误提示元素";
+}
+
 // Wait for client-side rendering/session restoration after navigation. On many sites,
 // the login form is visible in the initial HTML while JavaScript is still validating the
 // existing session. If both markers are configured, give the success marker priority for
@@ -91,10 +133,11 @@ async function loginIfRequired(task, page) {
     };
   }
 
-  const passwordField = await findVisible(
+  // 即使未配置网站专属标记，也先等待动态登录表单渲染，不能仅凭“暂时没有密码框”就认定已登录。
+  const passwordField = await waitForPasswordField(
     page,
-    task.password_selector,
-    ['input[type="password"]']
+    task.password_selector || 'input[type="password"]',
+    5000
   );
 
   // 配置成功标记但未命中时，若也没有明确的登录表单/失效标记，不盲目提交密码。
@@ -102,12 +145,21 @@ async function loginIfRequired(task, page) {
     if (task.success_selector) {
       return { success: false, attempted: false, message: "未检测到登录成功标记或登录表单，登录状态不明确；请检查成功/失效选择器" };
     }
+    let currentTitle = "";
+    try { currentTitle = await page.title(); } catch {}
+    if (looksLikeLoginLocation(page.url(), currentTitle)) {
+      return {
+        success: false,
+        attempted: false,
+        message: "页面仍处于疑似登录路径或登录页面标题，但未找到可见密码框；无法确认登录状态，已避免误报为登录成功。请检查页面加载、密码选择器或网站登录流程"
+      };
+    }
     return {
       success: true,
       attempted: false,
       message: task.logged_out_selector
         ? "未检测到登录失效标记，按当前登录态继续保活"
-        : "未发现登录表单，按已有登录态处理"
+        : "等待页面渲染后未发现登录表单，按已有登录态处理"
     };
   }
 
@@ -118,8 +170,9 @@ async function loginIfRequired(task, page) {
     return { success: false, attempted: false, message: "缺少登录密码" };
   }
 
+  let usernameField = null;
   if (task.auth_mode === "username_password") {
-    const usernameField = await findVisible(
+    usernameField = await findVisible(
       page,
       task.username_selector,
       [
@@ -146,8 +199,21 @@ async function loginIfRequired(task, page) {
     'button:has-text("Continue")'
   ]);
 
-  if (submit) await submit.click({ timeout: 10000 });
-  else await passwordField.press("Enter");
+  // 仅记录按钮文本和是否填入字段，不记录用户名或密码本身。
+  let submitDescription = "按 Enter 提交";
+  let usernameFilled = task.auth_mode !== "username_password";
+  let passwordFilled = false;
+  try { usernameFilled = task.auth_mode !== "username_password" || Boolean((await usernameField.inputValue()).trim()); } catch {}
+  try { passwordFilled = Boolean(await passwordField.inputValue()); } catch {}
+  if (submit) {
+    try {
+      const buttonText = ((await submit.innerText().catch(() => "")) || (await submit.getAttribute("aria-label").catch(() => "")) || (await submit.getAttribute("type").catch(() => "submit"))).replace(/\s+/g, " ").trim().slice(0, 60);
+      submitDescription = `点击按钮「${buttonText || "未命名"}」`;
+    } catch { submitDescription = "点击匹配到的提交按钮"; }
+    await submit.click({ timeout: 10000 });
+  } else {
+    await passwordField.press("Enter");
+  }
 
   // 登录后各网站的跳转和前端状态更新速度不同。通用地轮询最多 30 秒，
   // 不将任何特定网站的 URL 写死；优先采用用户配置的成功标记，否则观察登录表单是否消失。
@@ -189,10 +255,11 @@ async function loginIfRequired(task, page) {
     const status = task.success_selector
       ? "未检测到配置的登录成功标记"
       : "登录表单或失效标记在等待结束时仍可见";
+    const errorText = await visibleLoginErrorText(page);
     return {
       success: false,
       attempted: true,
-      message: `${status}；等待 30 秒后诊断：路径=${currentPath}，标题=${pageTitle}，用户名框可见=${!!stillHasUsername}，密码框可见=${!!stillHasPassword}，失效标记可见=${!!stillLoggedOut}。请检查凭据、选择器或网站登录流程`
+      message: `${status}；等待 30 秒后诊断：路径=${currentPath}，标题=${pageTitle}，用户名框可见=${!!stillHasUsername}，密码框可见=${!!stillHasPassword}，用户名已填=${usernameFilled}，密码已填=${passwordFilled}，提交方式=${submitDescription}，失效标记可见=${!!stillLoggedOut}，页面提示=${errorText}。请检查凭据、选择器或网站登录流程`
     };
   }
 
