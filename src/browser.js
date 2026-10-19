@@ -3,6 +3,7 @@ const { spawn, execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const net = require("net");
 const { encryptText, decryptText } = require("./keepalive-crypto");
 
 const { addLog } = require("./logger");
@@ -35,8 +36,30 @@ const rcloneConf = process.env.RCLONE_CONF || "";
 
 let xvfb = null;
 let fluxbox = null;
+let ownsXvfb = false;
+let ownsFluxbox = false;
 
-let display = ":99";
+let display = process.env.DISPLAY || ":99";
+
+// 通过 X11 Unix socket 探测显示服务是否真的可用。不能仅凭锁文件判断，
+// 因为上次异常退出可能留下锁；同样也不能直接删除可能属于活动进程的锁。
+function isDisplayActive(displayName, timeoutMs = 400) {
+  const displayNumber = String(displayName).replace(/^:/, "").split(".")[0];
+  const socketPath = `/tmp/.X11-unix/X${displayNumber}`;
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      try { socket.destroy(); } catch {}
+      resolve(value);
+    };
+    const socket = net.createConnection(socketPath);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.setTimeout(timeoutMs, () => finish(false));
+  });
+}
 
 
 /*
@@ -46,125 +69,73 @@ let display = ":99";
  */
 
 async function startXvfb() {
-
-  console.log(
-    `[Browser] 正在启动 Xvfb：${display}`
-  );
-
-  xvfb = spawn(
-    "Xvfb",
-    [
-      display,
-      "-screen",
-      "0",
-      "1920x1080x24",
-      "-ac",
-      "-nolisten",
-      "tcp"
-    ],
-    {
-      detached: false,
-      stdio: [
-        "ignore",
-        "ignore",
-        "pipe"
-      ]
-    }
-  );
-
-  if (xvfb.stderr) {
-
-    xvfb.stderr.on(
-      "data",
-      chunk => {
-
-        console.error(
-          "[Xvfb]",
-          chunk.toString().trim()
-        );
-
-      }
-    );
-
-  }
-
-  await new Promise(
-    (resolve, reject) => {
-
-      let finished = false;
-
-      const timer =
-        setTimeout(
-          () => {
-
-            if (finished) {
-              return;
-            }
-
-            finished = true;
-
-            resolve();
-
-          },
-          1000
-        );
-
-      xvfb.once(
-        "error",
-        error => {
-
-          if (finished) {
-            return;
-          }
-
-          finished = true;
-
-          clearTimeout(timer);
-
-          reject(error);
-
-        }
-      );
-
-      xvfb.once(
-        "exit",
-        code => {
-
-          if (finished) {
-            return;
-          }
-
-          if (
-            code !== null &&
-            code !== 0
-          ) {
-
-            finished = true;
-
-            clearTimeout(timer);
-
-            reject(
-              new Error(
-                `Xvfb 启动失败，退出码 ${code}`
-              )
-            );
-
-          }
-
-        }
-      );
-
-    }
-  );
-
   process.env.DISPLAY = display;
 
-  console.log(
-    `[Browser] Xvfb 启动完成：${display}`
-  );
+  // 平台可能已预先启动 Xvfb，或旧服务进程尚未完全退出。
+  // 如果 socket 能连接，就复用该显示服务，不再启动第二个 Xvfb。
+  if (await isDisplayActive(display)) {
+    xvfb = null;
+    ownsXvfb = false;
+    console.log(`[Browser] 检测到 DISPLAY ${display} 已可用，复用现有 Xvfb`);
+    return;
+  }
 
+  console.log(`[Browser] 正在启动 Xvfb：${display}`);
+  const child = spawn("Xvfb", [
+    display, "-screen", "0", "1920x1080x24", "-ac", "-nolisten", "tcp"
+  ], {
+    detached: false,
+    stdio: ["ignore", "ignore", "pipe"]
+  });
+  xvfb = child;
+  ownsXvfb = true;
+
+  if (child.stderr) {
+    child.stderr.on("data", chunk => {
+      const message = chunk.toString().trim();
+      if (message) console.error("[Xvfb]", message);
+    });
+  }
+
+  const outcome = await new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish({ ready: true }), 1000);
+    child.once("error", error => finish({ error }));
+    child.once("exit", (code, signal) => finish({ exited: true, code, signal }));
+  });
+
+  if (outcome.error) {
+    xvfb = null;
+    ownsXvfb = false;
+    // 启动命令报错时再探测一次，处理其他启动者刚好抢先启动的竞争情况。
+    if (await isDisplayActive(display)) {
+      console.log(`[Browser] DISPLAY ${display} 已由其他启动者建立，复用现有 Xvfb`);
+      return;
+    }
+    throw outcome.error;
+  }
+
+  if (outcome.exited) {
+    xvfb = null;
+    ownsXvfb = false;
+    // 例如 Xvfb 因 display 已被占用而立即退出。若服务确实可用则复用，
+    // 否则明确报错，不把一个已退出的进程误记为启动成功。
+    if (await isDisplayActive(display)) {
+      console.log(`[Browser] 检测到其他 Xvfb 已占用 ${display}，复用现有显示服务`);
+      return;
+    }
+    throw new Error(`Xvfb 启动失败，退出码 ${outcome.code === null ? outcome.signal : outcome.code}`);
+  }
+
+  process.env.DISPLAY = display;
+  console.log(`[Browser] Xvfb 启动完成：${display}`);
 }
-
 
 /*
  * ============================
@@ -175,6 +146,18 @@ async function startXvfb() {
 async function startFluxbox() {
 
   try {
+    // 同一容器中若已有窗口管理器，就复用它，避免重复启动。
+    let existingFluxbox = false;
+    try {
+      const procEntries = fs.readdirSync("/proc").filter(name => /^\d+$/.test(name));
+      existingFluxbox = procEntries.some(pid => {
+        try { return fs.readFileSync(`/proc/${pid}/comm`, "utf8").trim() === "fluxbox"; } catch { return false; }
+      });
+    } catch {}
+    if (existingFluxbox) {
+      console.log("[Browser] 检测到已有 Fluxbox，复用现有窗口管理器");
+      return;
+    }
 
     fluxbox = spawn(
       "fluxbox",
@@ -185,17 +168,16 @@ async function startFluxbox() {
       }
     );
 
-    await new Promise(
-      resolve =>
-        setTimeout(
-          resolve,
-          500
-        )
-    );
+    ownsFluxbox = true;
+    await new Promise(resolve => setTimeout(resolve, 500));
 
-    console.log(
-      "[Browser] Fluxbox 启动完成"
-    );
+    if (fluxbox && fluxbox.exitCode !== null) {
+      fluxbox = null;
+      ownsFluxbox = false;
+      console.log("[Browser] Fluxbox 未能启动，继续运行");
+      return;
+    }
+    console.log("[Browser] Fluxbox 启动完成");
 
   } catch (error) {
 
@@ -258,8 +240,10 @@ async function ensureBrowser() {
   } catch (error) {
     if (context) { try { await context.close(); } catch {} context = null; }
     if (browser) { try { await browser.close(); } catch {} browser = null; }
-    if (xvfb) { try { xvfb.kill(); } catch {} xvfb = null; }
-    if (fluxbox) { try { fluxbox.kill(); } catch {} fluxbox = null; }
+    if (xvfb && ownsXvfb) { try { xvfb.kill(); } catch {} }
+    xvfb = null; ownsXvfb = false;
+    if (fluxbox && ownsFluxbox) { try { fluxbox.kill(); } catch {} }
+    fluxbox = null; ownsFluxbox = false;
     throw error;
   } finally {
     browserStartupPromise = null;
@@ -887,8 +871,10 @@ async function closeBrowser() {
     catch { console.error("[Browser] 关闭 Chromium 失败"); }
     browser = null;
   }
-  if (fluxbox) { try { fluxbox.kill(); } catch {} fluxbox = null; }
-  if (xvfb) { try { xvfb.kill(); } catch {} xvfb = null; }
+  if (fluxbox && ownsFluxbox) { try { fluxbox.kill(); } catch {} }
+  fluxbox = null; ownsFluxbox = false;
+  if (xvfb && ownsXvfb) { try { xvfb.kill(); } catch {} }
+  xvfb = null; ownsXvfb = false;
   console.log("[Browser] 浏览器已关闭");
 }
 
